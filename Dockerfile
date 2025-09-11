@@ -1,22 +1,9 @@
-# Dockerfile
 FROM python:3.11-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
 WORKDIR /app
-
-# OS deps for psycopg2
-RUN apt-get update && apt-get install -y build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
-
-# Python deps
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev \
+ && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy app
+RUN pip install --no-cache-dir -r requirements.txt gunicorn
 COPY . .
-
-EXPOSE 5000
-
-# Run Flask
-CMD ["flask", "run", "--host=0.0.0.0", "--port=5000"]
+CMD ["gunicorn","-w","2","-k","gthread","--threads","8","-b","0.0.0.0:5000","app:app"]

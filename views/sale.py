@@ -18,10 +18,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image as RLImage, PageBreak
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from utils.email_alert import (
-    send_credit_repayment_email,
-    send_customer_payment_receipt,
-)
+
 from utils.printer import print_sale_80mm
 from contextlib import suppress
 
@@ -992,25 +989,7 @@ def create_payment_for_sale(sale_id):
         db.session.rollback()
         return jsonify({"ok": False, "error": str(e)}), 400
 
-def _send_credit_repayment_email(customer, sale, pay):
-    try:
-        from utils.email_alert import send_credit_repayment_email as _fn
-        _fn(customer, sale, pay)
-        return True
-    except Exception as e1:
-        try:
-            from utils.email_alert import send_customer_payment_receipt as _fn2
-            _fn2(
-                customer_name=getattr(customer, "name", None),
-                customer_email=getattr(customer, "email", None),
-                amount=float(getattr(pay, "amount", 0) or 0),
-                balance=float(getattr(sale, "balance_due", 0) or 0),
-                sale_id=getattr(sale, "id", None),
-            )
-            return True
-        except Exception as e2:
-            current_app.logger.exception("Failed to send credit repayment email: %s / %s", e1, e2)
-            return False
+
 
 @retail_bp.route("/credit-sales/<int:sale_id>/payments", methods=["POST"])
 @jwt_required()
@@ -1065,23 +1044,18 @@ def create_payment_for_credit_sale(sale_id):
         db.session.commit()
         db.session.refresh(sale)
 
-        sent = False
-        try:
-            if sale.customer and sale.customer.email:
-                sent = send_credit_repayment_email(sale.customer, sale, pay)
-        except Exception as e:
-            current_app.logger.warning("Credit repayment email failed: %s", e)
-
+        # ✅ No email sending for credit payments:
         return jsonify({
             "ok": True,
             "message": "Credit payment recorded",
-            "email_sent": bool(sent),
+            "email_sent": False,  # kept for frontend compatibility
             "data": _to_payment_dict(pay)
         }), 201
 
     except Exception as e:
         db.session.rollback()
         return jsonify({"ok": False, "error": str(e)}), 400
+
 
 @retail_bp.route("/retail-sales/<int:sale_id>/payments", methods=["GET"])
 @jwt_required()

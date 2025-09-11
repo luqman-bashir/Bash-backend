@@ -17,19 +17,21 @@ def _current_user():
     except Exception:
         return None
 
-def _send_email(subject: str, recipients: list[str], body: str, html: str | None = None) -> bool:
+def _send_email(subject: str, recipients: list[str], body: str, html: str | None = None,
+                reply_to: str | None = None, sender: str | None = None) -> bool:
     """
     Centralized email sender. Returns True on success, False on any failure.
+    Uses MAIL_DEFAULT_SENDER unless 'sender' override is provided.
     """
     if not recipients:
         return False
 
-    app = current_app  # already in request context when called from routes
     try:
-        msg = Message(subject=subject, recipients=recipients, body=body)
+        msg = Message(subject=subject, recipients=recipients, body=body, sender=sender)
         if html:
             msg.html = html
-        # Optional: default sender picked from MAIL_DEFAULT_SENDER config
+        if reply_to:
+            msg.reply_to = reply_to
         mail.send(msg)
         return True
     except Exception as e:
@@ -37,20 +39,21 @@ def _send_email(subject: str, recipients: list[str], body: str, html: str | None
         return False
 
 # ---------- emails ----------
-def send_admin_approval_code(user, ip, agent, code):
-    """Send approval code email to all overall admins."""
+def send_admin_approval_code(user, ip, agent, code, request_id=None):
+    """Send approval code email to all overall admins (layout preserved)."""
     print("📧 EMAIL FUNCTION TRIGGERED from send_admin_approval_code()")
 
-    # Pull admins
     overall_admins = User.query.filter_by(
         role="admin", admin_level="overall", is_active=True
     ).all()
     to_list = [a.email for a in overall_admins if a.email]
-    print("🔍 Found overall admins:", to_list)
     if not to_list:
         return False
 
     subject = "Approval Code: New Device Login"
+
+    rid_line = f"🆔 Request ID: {request_id}\n" if request_id else ""
+
     body = f"""
 Hello,
 
@@ -60,7 +63,7 @@ A login attempt from an unapproved device requires your authorization.
 📍 IP Address: {ip}
 🖥️ User-Agent: {agent}
 
-Approval Code: {code}
+{rid_line}Approval Code: {code}
 
 Enter this code in the admin dashboard to approve the login.
 
@@ -108,6 +111,7 @@ Thank you for your payment.
 
 Best regards,
 {sender_name} ({sender_role})
+{business}
 """.strip()
 
     ok = _send_email(subject, [customer.email], body)
@@ -137,6 +141,7 @@ We have received your payment for sale #{sale_id}.
 Thank you for your business.
 
 Regards,
+{business}
 """.strip()
 
     ok = _send_email(subject, [customer_email], body)

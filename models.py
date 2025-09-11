@@ -232,7 +232,7 @@ class DeviceApprovalRequest(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('users.id', ondelete="CASCADE"), nullable=False)
-    ip_address = db.Column(db.String(100), nullable=False)
+    ip_address = db.Column(db.String(100), nullable=True)
     user_agent = db.Column(db.String(255), nullable=False)
     secret_code = db.Column(db.String(6), nullable=False)
     is_resolved = db.Column(db.Boolean, default=False)

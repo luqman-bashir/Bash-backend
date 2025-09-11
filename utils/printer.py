@@ -8,18 +8,46 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from flask import current_app
 from escpos.printer import Network
+# --- quiet down python-escpos destructor/close noise --------------------------
+from contextlib import suppress
+try:
+    import escpos.printer as _epr
+    from escpos.escpos import Escpos as _Escpos
+
+    # Wrap Network.close so shutdown/close errors don't bubble to stderr
+    _orig_close = _epr.Network.close
+    def _quiet_network_close(self, *a, **kw):
+        try:
+            return _orig_close(self, *a, **kw)
+        except OSError:
+            # already closed / bad fd — ignore
+            return None
+        except Exception:
+            return None
+    _epr.Network.close = _quiet_network_close
+
+    # Wrap Escpos.__del__ so any late close errors are swallowed
+    if hasattr(_Escpos, "__del__"):
+        _orig_del = _Escpos.__del__
+        def _quiet_del(self):
+            with suppress(Exception):
+                _orig_del(self)
+        _Escpos.__del__ = _quiet_del
+except Exception:
+    # If library layout differs, just skip the patch
+    pass
+# ------------------------------------------------------------------------------
 
 # ── Printer/env config ──────────────────────────────────────────────────────────
-PRINTER_IP: str = os.getenv("PRINTER_IP", "192.168.0.101").strip()
+PRINTER_IP: str = os.getenv("PRINTER_IP", "192.168.150.165").strip()
 PRINTER_PORT: int = int(os.getenv("PRINTER_PORT", "9100"))
 
 # NEW: smart-resolver settings (all optional)
 PRINTER_HOST: str = os.getenv("PRINTER_HOST", "").strip()                  # e.g. 'receipt-printer'
-PRINTER_SUBNET: str = os.getenv("PRINTER_SUBNET", "192.168.0.0/24").strip()
+PRINTER_SUBNET: str = os.getenv("PRINTER_SUBNET", "192.168.150.0/24").strip()
 PRINTER_CACHE_FILE: str = os.getenv("PRINTER_CACHE_FILE", "/tmp/receipt_printer_ip").strip()
 PRINTER_DISCOVERY_TIMEOUT_MS: int = int(os.getenv("PRINTER_DISCOVERY_TIMEOUT_MS", "250"))
-PRINTER_DISCOVERY_WORKERS: int = int(os.getenv("PRINTER_DISCOVERY_WORKERS", "80"))
-PRINTER_SCAN_LIST: str = os.getenv("PRINTER_SCAN_LIST", "").strip()        # "192.168.0.101,192.168.0.110-120,192.168.0.0/28"
+PRINTER_DISCOVERY_WORKERS: int = int(os.getenv("PRINTER_DISCOVERY_WORKERS", "80"))        # "192.168.0.101,192.168.0.110-120,192.168.0.0/28"
 
 LINE_WIDTH = 48  # ≈48 chars per line on 80mm
 TZ = ZoneInfo(os.getenv("RECEIPT_TZ", "Africa/Nairobi"))
@@ -29,7 +57,7 @@ COMPANY_NAME = os.getenv("RECEIPT_COMPANY_NAME", "Blue Bash Investment Ltd")
 COMPANY_CONTACT_LINES = [
     os.getenv("RECEIPT_ADDRESS", "P.O.Box 101-70100, Garissa"),
     os.getenv("RECEIPT_TEL",     "Tel: 02 02 447 447 / 07 42 252 535"),
-    os.getenv("RECEIPT_EMAIL",   "Email: blueskydrinkingwater@gmail.com"),
+    os.getenv("RECEIPT_EMAIL",   "Email: bluebashdrinkingwater@gmail.com"),
 ]
 
 # ── Logo settings (outline + small) ─────────────────────────────────────────────
@@ -40,6 +68,28 @@ LOGO_EDGE_THR = max(1, min(254, int(os.getenv("RECEIPT_LOGO_EDGE_THR", "50")))) 
 LOGO_EDGE_MARGIN = max(0, int(os.getenv("RECEIPT_LOGO_EDGE_MARGIN", "3")))
 LOGO_STROKE_DILATE = (os.getenv("RECEIPT_LOGO_STROKE_DILATE", "0").strip().lower() not in ("0","false","no","off"))
 
+# ── ESC/POS compat helpers (use these instead of p.set) ────────────────────────
+def _align(p, where: str = "left"):
+    m = {"left": 0, "center": 1, "right": 2}
+    p._raw(b"\x1b\x61" + bytes([m.get(where, 0)]))  # ESC a n
+
+def _bold(p, on: bool):
+    p._raw(b"\x1bE" + (b"\x01" if on else b"\x00"))  # ESC E n
+
+def _underline(p, n: int = 0):
+    p._raw(b"\x1b-" + bytes([0 if n not in (1, 2) else n]))  # ESC - n
+
+def _size(p, width: int = 1, height: int = 1):
+    # GS ! n  (bit 0-3: height, 4-7: width)
+    w = 0x10 if (width or 1) >= 2 else 0x00
+    h = 0x01 if (height or 1) >= 2 else 0x00
+    p._raw(b"\x1d!" + bytes([w | h]))
+
+def pset(p, *, align=None, bold=None, width=None, height=None, underline=None):
+    if align is not None: _align(p, align)
+    if width is not None or height is not None: _size(p, width or 1, height or 1)
+    if bold is not None: _bold(p, bool(bold))
+    if underline is not None: _underline(p, int(underline))
 
 # ── Smart IP resolution helpers ────────────────────────────────────────────────
 def _cache_get() -> str | None:
@@ -194,16 +244,18 @@ def resolve_printer_ip() -> str:
             _cache_set(pref); return pref
     _cache_set(candidates[0]); return candidates[0]
 
-
 # ── Low-level helpers ───────────────────────────────────────────────────────────
 def _reset(p: Network):
     """ESC @ — clear any previous binary mode/state."""
     p._raw(b"\x1b@")
 
 def _connect(timeout: float = 5.0) -> Network:
-    """Create the Network printer using the robust resolver above."""
-    ip = resolve_printer_ip()
-    return Network(ip, PRINTER_PORT, timeout=timeout)
+    """
+    CHANGED: Always use PRINTER_IP directly, skip any discovery/scan.
+    """
+    if not PRINTER_IP:
+        raise RuntimeError("PRINTER_IP is not set. Set it in your .env (e.g., 192.168.0.100).")
+    return Network(PRINTER_IP, PRINTER_PORT, timeout=timeout)
 
 # ── Formatting helpers ──────────────────────────────────────────────────────────
 def _money(x) -> str:
@@ -416,12 +468,11 @@ def _print_logo_outline(p: Network) -> None:
 
         bw = mask.convert("1")  # 1-bit for thermal printers
 
-        p.set(align="center")
+        pset(p, align="center")
         p.image(bw)
-        # No extra p.text("\n") here → header will follow immediately on next line
+        # No extra newline here → header follows immediately
     except Exception:
         pass
-
 
 # ── Public API (no QR) ─────────────────────────────────────────────────────────
 def print_sale_80mm(sale, copies: int = 1) -> None:
@@ -444,16 +495,16 @@ def _print_one_copy(sale) -> None:
         _print_logo_outline(p)
 
         # ── Company header ────────────────────────────────────────────────────
-        p.set(align="center", bold=True, width=2, height=2)
+        pset(p, align="center", bold=True, width=1, height=1)
         p.text(COMPANY_NAME + "\n")
-        p.set(align="center", bold=False, width=1, height=1)
+        pset(p, align="center", bold=False, width=1, height=1)
         for line in COMPANY_CONTACT_LINES:
             if line:
                 p.text(str(line) + "\n")
         p.text("\n")
 
         # ── Meta (top): Receipt / Date / Type / Customer (one-line style) ────
-        p.set(align="left", bold=True, width=1, height=1)
+        pset(p, align="left", bold=True, width=1, height=1)
         p.text(f"Receipt : {getattr(sale, 'receipt_number', '')}\n")
         date_val = getattr(sale, "date", None)
         p.text(f"Date    : {_format_dt(date_val)}\n")
@@ -468,7 +519,7 @@ def _print_one_copy(sale) -> None:
         p.text("\n")
 
         # ── Items table header ────────────────────────────────────────────────
-        p.set(align="left", bold=True)
+        pset(p, align="left", bold=True)
         p.text(
             "ITEM".ljust(ITEM_W) +
             "QTY".rjust(QTY_W) +
@@ -478,7 +529,7 @@ def _print_one_copy(sale) -> None:
         p.text("-" * LINE_WIDTH + "\n")
 
         # ── Items ────────────────────────────────────────────────────────────
-        p.set(bold=False)
+        pset(p, bold=False)
         items = (getattr(sale, "items", None) or [])
         total_qty = 0
 
@@ -503,11 +554,11 @@ def _print_one_copy(sale) -> None:
         paid     = float(getattr(sale, "paid_amount", 0) or 0)
         balance  = max(0.0, subtotal - paid)
 
-        p.set(bold=True)
+        pset(p, bold=True)
         p.text(_row_right("TOTAL",   _money(subtotal)) + "\n")
         p.text(_row_right("PAID",    _money(paid))     + "\n")
         p.text(_row_right("BALANCE", _money(balance))  + "\n")
-        p.set(bold=False)
+        pset(p, bold=False)
 
         # ── Payment method / reference (if any) ──────────────────────────────
         mpesa_ref  = getattr(sale, "payment_ref", None) or getattr(sale, "mpesa_ref", None)
@@ -532,9 +583,12 @@ def _print_one_copy(sale) -> None:
 
         # ── Footer ───────────────────────────────────────────────────────────
         p.text("-" * LINE_WIDTH + "\n")
-        p.set(align="center")
+        pset(p, align="center")
         p.text("Thank you for your purchase!\n\n")
         p.cut()
     finally:
-        with suppress(Exception):
+        # CHANGED: close quietly to avoid noisy OSError: [Errno 9] on GC.
+        try:
             p.close()
+        except Exception:
+            pass
